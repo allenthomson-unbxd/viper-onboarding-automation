@@ -6,7 +6,7 @@ GitHub Actions workflows triggered by Viper via [`repository_dispatch`](https://
 
 | `event_type`           | Workflow file                 | Purpose |
 |------------------------|-------------------------------|---------|
-| `onboarding-prepare`   | `onboarding-prepare.yml`      | Clone viper + feed-conversion, resolve latest FC tag, build proposed config, POST results to Viper. |
+| `onboarding-prepare`   | `onboarding-prepare.yml`      | Optionally read latest **feed-conversion** release tag, **GET** merged templates from **Viper** `prepare-context`, then **POST** `ingest-prepare`. |
 | `onboarding-apply`     | `onboarding-apply.yml`        | Fetch approved bundle from Viper, clone solution-jobs v3, branch, copy customer folder, open PR. |
 
 Viper sends `client_payload` on successful site-config save (when `GITHUB_ONBOARDING_REPO` and `GITHUB_ONBOARDING_TOKEN` are set), for example:
@@ -26,11 +26,21 @@ Configure in **Settings → Secrets and variables → Actions** for this repo:
 
 | Secret | Used by |
 |--------|---------|
-| `VIPER_INTERNAL_BASE_URL` | Public base URL of Viper, no trailing slash (e.g. `https://search-pimapps.unbxd.io`). Used for `POST …/setup/app/internal/onboarding/<draft_id>/ingest-prepare/`. GitHub cannot reach `http://localhost`; use a deployed URL or a tunnel. |
-| `ONBOARDING_INGEST_HMAC_SECRET` | Same value as Viper env `ONBOARDING_INGEST_HMAC_SECRET`. Signs the raw JSON body for ingest. |
-| `GH_CLONE_TOKEN` | PAT with `repo` scope to clone **viper**, **feed-conversion**, and **solution-jobs** (read + push where needed). Optional until clone/PR steps are implemented; optional if repos are public and `GITHUB_TOKEN` is enough. |
+| `VIPER_INTERNAL_BASE_URL` | Public base URL of Viper, no trailing slash (e.g. `https://search-pimapps.unbxd.io`). Used for `prepare-context` + `ingest-prepare`. GitHub cannot reach `http://localhost` without a tunnel. |
+| `ONBOARDING_INGEST_HMAC_SECRET` | Same value as Viper env `ONBOARDING_INGEST_HMAC_SECRET`. Signs **GET** `prepare-context` (message = draft UUID) and **POST** `ingest-prepare` (message = raw JSON body). |
+| `GH_CLONE_TOKEN` | PAT with `repo` (and `read:packages` if needed). Used for `gh api` on private `FEED_CONVERSION_REPO`, and later for clone/PR in **apply**. Optional if all APIs/repos are public. |
+| `FEED_CONVERSION_REPO` | Optional, e.g. `unbxd/feed-conversion`. With `GH_CLONE_TOKEN`, workflow reads the **latest GitHub release tag** and passes it as `feed_conversion_tag` to `prepare-context`. |
 
-If `VIPER_INTERNAL_BASE_URL` or `ONBOARDING_INGEST_HMAC_SECRET` is unset, **prepare** still runs but **skips** the ingest step (stub mode).
+If `VIPER_INTERNAL_BASE_URL` or `ONBOARDING_INGEST_HMAC_SECRET` is unset, **prepare** still runs but **skips** Viper calls (stub mode).
+
+### Viper internal URLs (same HMAC secret as ingest)
+
+| Method | Path | Signature |
+|--------|------|-----------|
+| GET | `/setup/app/internal/onboarding/<draft_id>/prepare-context/` | `X-Onboarding-Signature: sha256(HMAC(secret, utf8(draft_id)))` |
+| POST | `/setup/app/internal/onboarding/<draft_id>/ingest-prepare/` | `X-Onboarding-Signature: sha256(HMAC(secret, raw_json_body))` |
+
+`prepare-context` returns JSON including **`proposed_files`**: merged YAML/Argo text from **Viper’s** `cookiecutter_template/custom_transformer` (same layout as the feed-conversion cookiecutter). Optional query `feed_conversion_tag` is stored on the draft for traceability.
 
 ## Manual test dispatch
 

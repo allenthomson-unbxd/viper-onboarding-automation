@@ -1,33 +1,80 @@
-name: Onboarding — apply
+# Copy to viper-onboarding-automation/.github/workflows/onboarding-apply.yml
+#
+# After user approves in Viper UI, Viper dispatches ``onboarding-apply`` with:
+#   client_payload: { draft_id, site_key, customer_folder_name }
+#
+# Secrets: VIPER_INTERNAL_BASE_URL, ONBOARDING_INGEST_HMAC_SECRET, GH_CLONE_TOKEN,
+#          SOLUTION_JOBS_REPO (owner/repo), optional SOLUTION_JOBS_BASE_PATH (default: customers)
+
+name: onboarding-apply
 
 on:
   repository_dispatch:
     types: [onboarding-apply]
 
-concurrency:
-  group: onboarding-apply-${{ github.event.client_payload.draft_id }}
-  cancel-in-progress: true
-
 jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
-      - name: Show dispatch payload
-        env:
-          PAYLOAD: ${{ toJson(github.event.client_payload) }}
-        run: |
-          echo "repository_dispatch payload:"
-          echo "$PAYLOAD"
-
-      - name: Checkout automation repo (scripts)
+      - name: Checkout solution-jobs
         uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOLUTION_JOBS_REPO }}
+          path: solution-jobs
+          token: ${{ secrets.GH_CLONE_TOKEN }}
 
-      # --- Next steps ---
-      # - Optional: GET approved bundle from Viper (new endpoint + auth TBD).
-      # - Clone solution-jobs (v3 / configured ref) using secrets.GH_CLONE_TOKEN.
-      # - Branch: e.g. onboarding/<site_key>-<draft_id short>
-      # - Copy customer folder from checkout or artifact, commit, push.
-      # - gh pr create (token needs contents + pull_requests on solution-jobs).
+      - name: Fetch approved bundle from Viper
+        env:
+          VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
+          HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
+          DRAFT_ID: ${{ github.event.client_payload.draft_id }}
+          BASE_PATH: ${{ vars.SOLUTION_JOBS_BASE_PATH }}
+          FOLDER: ${{ github.event.client_payload.customer_folder_name }}
+        run: |
+          set -euo pipefail
+          export BASE_PATH="${BASE_PATH:-customers}"
+          test -n "${VIPER_BASE:-}" && test -n "${HMAC_SECRET:-}" && test -n "${DRAFT_ID:-}"
+          test -n "${FOLDER:-}" || (echo "customer_folder_name missing in payload" && exit 1)
+          python3 << 'PY'
+          import hashlib, hmac, json, os, pathlib, urllib.request
 
-      - name: Placeholder — mark job visible in Actions UI
-        run: echo "apply stub complete for draft_id=${{ github.event.client_payload.draft_id }}"
+          base = os.environ["VIPER_BASE"].rstrip("/")
+          secret = os.environ["HMAC_SECRET"].encode("utf-8")
+          draft = os.environ["DRAFT_ID"].strip()
+          sig = hmac.new(secret, draft.encode("utf-8"), hashlib.sha256).hexdigest()
+          url = "{}/setup/app/internal/onboarding/{}/apply-context/".format(base, draft)
+          req = urllib.request.Request(url, headers={"X-Onboarding-Signature": "sha256=" + sig})
+          with urllib.request.urlopen(req, timeout=120) as resp:
+              bundle = json.loads(resp.read().decode())
+
+          root = pathlib.Path("solution-jobs") / os.environ.get("BASE_PATH", "customers") / os.environ["FOLDER"]
+          root.mkdir(parents=True, exist_ok=True)
+          for rel, text in bundle["approved_files"].items():
+              path = root / rel
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(text if isinstance(text, str) else json.dumps(text), encoding="utf-8")
+          meta = pathlib.Path(os.environ["RUNNER_TEMP"]) / "apply_bundle.json"
+          meta.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+          print("Wrote tree under", root)
+          PY
+
+      - name: Create branch and PR
+        env:
+          GH_TOKEN: ${{ secrets.GH_CLONE_TOKEN }}
+          FOLDER: ${{ github.event.client_payload.customer_folder_name }}
+          SITE_KEY: ${{ github.event.client_payload.site_key }}
+          DRAFT_ID: ${{ github.event.client_payload.draft_id }}
+          BASE_PATH: ${{ vars.SOLUTION_JOBS_BASE_PATH }}
+        working-directory: solution-jobs
+        run: |
+          set -euo pipefail
+          export BASE_PATH="${BASE_PATH:-customers}"
+          BRANCH="onboarding/${DRAFT_ID:0:8}-${FOLDER}"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions"
+          git checkout -b "$BRANCH"
+          git add "${BASE_PATH}/${FOLDER}"
+          git status
+          git commit -m "Onboarding: ${FOLDER} (site ${SITE_KEY})" || { echo "Nothing to commit"; exit 0; }
+          git push -u origin "HEAD:refs/heads/$BRANCH"
+          gh pr create --fill --head "$BRANCH" --title "Onboarding: ${FOLDER} (${SITE_KEY})" --body "Automated from Viper draft \`${DRAFT_ID}\`." || true

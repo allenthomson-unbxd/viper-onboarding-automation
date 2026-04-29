@@ -1,81 +1,163 @@
-name: Onboarding — prepare
+# Copy to viper-onboarding-automation/.github/workflows/onboarding-prepare.yml
+#
+# When secrets.VIPER_CHECKOUT_REPO is set: clones viper + feed-conversion, runs
+# cookiecutter per onboarding/baseoverlay.yml, merges, POSTs ingest-prepare.
+# Otherwise: server-only flow (GET prepare-context returns proposed_files from Viper).
+#
+# Secrets: VIPER_INTERNAL_BASE_URL, ONBOARDING_INGEST_HMAC_SECRET, GH_CLONE_TOKEN
+# Optional: FEED_CONVERSION_REPO, VIPER_CHECKOUT_REPO (e.g. org/viper), VIPER_CHECKOUT_REF (default main)
+
+name: onboarding-prepare
 
 on:
   repository_dispatch:
     types: [onboarding-prepare]
 
-concurrency:
-  group: onboarding-prepare-${{ github.event.client_payload.draft_id }}
-  cancel-in-progress: true
-
 jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
-      - name: Show dispatch payload
+      - uses: actions/checkout@v4
+
+      - id: fc_tag
         env:
-          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          FEED_CONVERSION_REPO: ${{ secrets.FEED_CONVERSION_REPO }}
+          GH_CLONE_TOKEN: ${{ secrets.GH_CLONE_TOKEN }}
         run: |
-          echo "repository_dispatch payload:"
-          echo "$PAYLOAD"
+          TAG=""
+          TOKEN="${GH_CLONE_TOKEN:-$GITHUB_TOKEN}"
+          if [ -n "${FEED_CONVERSION_REPO:-}" ] && [ -n "${TOKEN:-}" ]; then
+            TAG=$(GH_TOKEN="$TOKEN" gh api "repos/${FEED_CONVERSION_REPO}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout automation repo (scripts)
+      - name: Checkout viper (for local merge)
+        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' }}
         uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.VIPER_CHECKOUT_REPO }}
+          ref: ${{ vars.VIPER_CHECKOUT_REF || 'main' }}
+          path: viper
+          token: ${{ secrets.GH_CLONE_TOKEN }}
 
-      # --- Next: clone viper + feed-conversion (e.g. secrets.GH_CLONE_TOKEN), run generators ---
-      # Build ``proposed_files`` as a JSON object: path -> file contents (strings).
+      - name: Checkout feed-conversion
+        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' && secrets.FEED_CONVERSION_REPO != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.FEED_CONVERSION_REPO }}
+          ref: ${{ steps.fc_tag.outputs.tag || 'main' }}
+          path: feed-conversion
+          token: ${{ secrets.GH_CLONE_TOKEN }}
 
-      - name: Ingest prepare result into Viper
+      - name: Install merge tooling
+        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' }}
+        run: pip install -r viper/onboarding/requirements-ci.txt
+
+      - name: Local cookiecutter merge + ingest
+        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' }}
         env:
           VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
           HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
           DRAFT_ID: ${{ github.event.client_payload.draft_id }}
-          SITE_KEY: ${{ github.event.client_payload.site_key }}
+          FEED_CONVERSION_TAG: ${{ steps.fc_tag.outputs.tag }}
         run: |
-          if [ -z "${VIPER_BASE:-}" ] || [ -z "${HMAC_SECRET:-}" ]; then
-            echo "::notice::Skipping Viper ingest — add repo secrets VIPER_INTERNAL_BASE_URL and ONBOARDING_INGEST_HMAC_SECRET (same value as Viper env ONBOARDING_INGEST_HMAC_SECRET)."
-            exit 0
-          fi
-          if [ -z "${DRAFT_ID:-}" ]; then
-            echo "::error::client_payload.draft_id is required"
-            exit 1
-          fi
+          set -euo pipefail
+          test -n "${VIPER_BASE:-}" && test -n "${HMAC_SECRET:-}" && test -n "${DRAFT_ID:-}"
           python3 << 'PY'
-          import hmac, hashlib, json, os, sys, urllib.error, urllib.request
+          import hashlib, hmac, json, os, subprocess, sys, urllib.parse, urllib.request
 
-          base = (os.environ.get("VIPER_BASE") or "").rstrip("/")
-          secret = (os.environ.get("HMAC_SECRET") or "").encode("utf-8")
-          draft = os.environ.get("DRAFT_ID") or ""
-          site_key = os.environ.get("SITE_KEY") or ""
+          base = os.environ["VIPER_BASE"].rstrip("/")
+          secret = os.environ["HMAC_SECRET"].encode("utf-8")
+          draft = os.environ["DRAFT_ID"].strip()
+          fc_tag = (os.environ.get("FEED_CONVERSION_TAG") or "").strip()
+          ws = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 
+          get_sig = hmac.new(secret, draft.encode("utf-8"), hashlib.sha256).hexdigest()
+          u = "{}/setup/app/internal/onboarding/{}/prepare-context/".format(base, draft)
+          if fc_tag:
+              u += "?" + urllib.parse.urlencode({"feed_conversion_tag": fc_tag})
+          req = urllib.request.Request(u, headers={"X-Onboarding-Signature": "sha256=" + get_sig})
+          with urllib.request.urlopen(req, timeout=120) as resp:
+              bundle = json.loads(resp.read().decode())
+
+          ctx = bundle.get("cookiecutter")
+          if not isinstance(ctx, dict):
+              print("prepare-context missing cookiecutter dict", file=sys.stderr)
+              sys.exit(1)
+          ctx_path = os.path.join(os.environ["RUNNER_TEMP"], "onboarding_cookiecutter.json")
+          with open(ctx_path, "w", encoding="utf-8") as fh:
+              json.dump(ctx, fh, indent=2, sort_keys=True)
+
+          env = os.environ.copy()
+          root = os.path.join(ws, "viper")
+          fc_candidate = os.path.join(ws, "feed-conversion")
+          fc = fc_candidate if os.path.isdir(fc_candidate) else root
+          out_json = os.path.join(os.environ["RUNNER_TEMP"], "ingest_body.json")
+          cmd = [
+              sys.executable,
+              "-m",
+              "onboarding.ci_render_merge",
+              "--viper-root",
+              root,
+              "--fc-root",
+              fc,
+              "--context",
+              ctx_path,
+              "--write-proposed-json",
+              out_json,
+          ]
+          env["PYTHONPATH"] = root
+          subprocess.check_call(cmd, cwd=root, env=env)
+
+          with open(out_json, encoding="utf-8") as fh:
+              body_obj = json.load(fh)
           body = {
-              "proposed_files": {
-                  "_generated_by": "viper-onboarding-automation",
-                  "_site_key": site_key,
-                  "_note": "Replace this stub with real paths and file contents from your generator.",
-              },
-              "feed_conversion_tag": "",
+              "proposed_files": body_obj["proposed_files"],
+              "feed_conversion_tag": bundle.get("feed_conversion_tag") or fc_tag,
           }
           raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
-          sig = hmac.new(secret, raw, hashlib.sha256).hexdigest()
-          url = f"{base}/setup/app/internal/onboarding/{draft}/ingest-prepare/"
-          req = urllib.request.Request(
-              url,
+          ps = hmac.new(secret, raw, hashlib.sha256).hexdigest()
+          post = urllib.request.Request(
+              "{}/setup/app/internal/onboarding/{}/ingest-prepare/".format(base, draft),
               data=raw,
-              headers={
-                  "Content-Type": "application/json",
-                  "X-Onboarding-Signature": f"sha256={sig}",
-              },
+              headers={"Content-Type": "application/json", "X-Onboarding-Signature": "sha256=" + ps},
               method="POST",
           )
-          try:
-              with urllib.request.urlopen(req, timeout=120) as resp:
-                  print(resp.read().decode())
-          except urllib.error.HTTPError as e:
-              try:
-                  detail = e.read().decode()
-              except Exception:
-                  detail = str(e)
-              sys.stderr.write(detail)
-              raise
+          with urllib.request.urlopen(post, timeout=300) as resp:
+              print(resp.read().decode())
+          PY
+
+      - name: Viper prepare-context + ingest (server-only)
+        if: ${{ secrets.VIPER_CHECKOUT_REPO == '' }}
+        env:
+          VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
+          HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
+          DRAFT_ID: ${{ github.event.client_payload.draft_id }}
+          FEED_CONVERSION_TAG: ${{ steps.fc_tag.outputs.tag }}
+        run: |
+          test -n "$VIPER_BASE" && test -n "$HMAC_SECRET" && test -n "$DRAFT_ID"
+          python3 << 'PY'
+          import hashlib, hmac, json, os, sys, urllib.error, urllib.parse, urllib.request
+          base = os.environ["VIPER_BASE"].rstrip("/")
+          secret = os.environ["HMAC_SECRET"].encode("utf-8")
+          draft = os.environ["DRAFT_ID"].strip()
+          fc_tag = (os.environ.get("FEED_CONVERSION_TAG") or "").strip()
+          get_sig = hmac.new(secret, draft.encode("utf-8"), hashlib.sha256).hexdigest()
+          u = "{}/setup/app/internal/onboarding/{}/prepare-context/".format(base, draft)
+          if fc_tag:
+              u += "?" + urllib.parse.urlencode({"feed_conversion_tag": fc_tag})
+          r = urllib.request.Request(u, headers={"X-Onboarding-Signature": "sha256=" + get_sig})
+          with urllib.request.urlopen(r, timeout=120) as resp:
+              bundle = json.loads(resp.read().decode())
+          body = {"proposed_files": bundle["proposed_files"], "feed_conversion_tag": bundle.get("feed_conversion_tag") or fc_tag}
+          raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+          ps = hmac.new(secret, raw, hashlib.sha256).hexdigest()
+          p = urllib.request.Request(
+              "{}/setup/app/internal/onboarding/{}/ingest-prepare/".format(base, draft),
+              data=raw,
+              headers={"Content-Type": "application/json", "X-Onboarding-Signature": "sha256=" + ps},
+              method="POST",
+          )
+          with urllib.request.urlopen(p, timeout=120) as resp:
+              print(resp.read().decode())
           PY
