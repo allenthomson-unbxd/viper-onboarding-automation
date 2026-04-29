@@ -51,6 +51,8 @@ jobs:
           root = pathlib.Path("solution-jobs") / os.environ.get("BASE_PATH", "customers") / os.environ["FOLDER"]
           root.mkdir(parents=True, exist_ok=True)
           for rel, text in bundle["approved_files"].items():
+              if rel.startswith("onboarding/"):
+                  continue
               path = root / rel
               path.parent.mkdir(parents=True, exist_ok=True)
               path.write_text(text if isinstance(text, str) else json.dumps(text), encoding="utf-8")

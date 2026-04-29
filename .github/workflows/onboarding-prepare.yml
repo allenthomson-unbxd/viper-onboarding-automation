@@ -60,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           FEED_R="${FEED_CONVERSION_REPO:-}"
-          [ -z "${FEED_R}" ] && FEED_R="allenthomson-unbxd/feed-conversion"
+          [ -z "${FEED_R}" ] && FEED_R="unbxd/feed-conversion"
           VIPER_R="${VIPER_RELEASE_REPO:-}"
           [ -z "${VIPER_R}" ] && VIPER_R="${VIPER_CHECKOUT_REPO:-}"
           [ -z "${VIPER_R}" ] && VIPER_R="${GITHUB_REPOSITORY_OWNER}/viper"
@@ -76,6 +76,11 @@ jobs:
           fi
           echo "feed_conversion_image_tag=${fc_img}" >> "$GITHUB_OUTPUT"
           echo "viper_image_tag=${vp_img}" >> "$GITHUB_OUTPUT"
+          echo "=== Onboarding prepare: release tag lookup (see prepare-context query params) ==="
+          echo "repos: feed-conversion=${FEED_R} viper=${VIPER_R}"
+          echo "resolved tags (passed to Viper prepare-context; empty means Viper uses env/API fallback):"
+          echo "  feed-conversion image tag: ${fc_img:-<none>}"
+          echo "  viper image tag:           ${vp_img:-<none>}"
 
       - id: viper_ref
         if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
