@@ -11,11 +11,12 @@
 #   If unset, falls back to VIPER_CHECKOUT_REPO, then ``allenthomson-unbxd/viper``.
 # GH_CLONE_TOKEN: PAT with repo read to private forks; if unset, github.token is used (public repos only).
 #
-# Release tag lookup (``release_image_tags`` + ``fc_tag``) uses GitHub Releases on:
-#   feed:   FEED_CONVERSION_REPO secret if set, else ``allenthomson-unbxd/feed-conversion``
-#   viper:  VIPER_RELEASE_REPO var if set, else VIPER_CHECKOUT_REPO secret, else ``allenthomson-unbxd/viper``
-# Override the secrets/vars if you need a different org/repo; Viper prepare-context still falls back to
-# ``ONBOARDING_*_IMAGE_TAG`` when CI passes no tag.
+# Release / image tag resolution (``release_image_tags`` then ``fc_tag`` for feed clone ref):
+#   Repos: feed = FEED_CONVERSION_REPO secret or ``allenthomson-unbxd/feed-conversion``; viper =
+#   VIPER_RELEASE_REPO var or VIPER_CHECKOUT_REPO secret or ``allenthomson-unbxd/viper``.
+#   Order per repo: (1) GitHub Releases (latest / first release), (2) newest git tag (GraphQL by tagged date),
+#   (3) optional repo variables FEED_CONVERSION_FALLBACK_IMAGE_TAG / VIPER_FALLBACK_IMAGE_TAG.
+#   If CI still passes no tag, Viper ``prepare-context`` uses ``ONBOARDING_*_IMAGE_TAG`` env on the server.
 
 name: onboarding-prepare
 
@@ -36,27 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - id: fc_tag
-        env:
-          GH_TOKEN: ${{ env.GH_CLONE_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG=""
-          FEED_REPO="${FEED_CONVERSION_REPO:-}"
-          [ -z "${FEED_REPO}" ] && FEED_REPO="allenthomson-unbxd/feed-conversion"
-          # releases/latest returns 404 JSON on stdout when there are no releases; do not pass that to checkout ref.
-          json=$(gh api "repos/${FEED_REPO}/releases/latest" 2>/dev/null || true)
-          if echo "${json}" | jq -e 'has("tag_name") and (.tag_name | type == "string")' >/dev/null 2>&1; then
-            TAG=$(echo "${json}" | jq -r .tag_name)
-          fi
-          if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
-            TAG=$(gh api "repos/${FEED_REPO}" --jq .default_branch)
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
       - id: release_image_tags
         env:
           GH_TOKEN: ${{ env.GH_CLONE_TOKEN }}
+          FEED_TAG_FALLBACK_VAR: ${{ vars.FEED_CONVERSION_FALLBACK_IMAGE_TAG }}
+          VIPER_TAG_FALLBACK_VAR: ${{ vars.VIPER_FALLBACK_IMAGE_TAG }}
         run: |
           set -euo pipefail
           FEED_R="${FEED_CONVERSION_REPO:-}"
@@ -65,10 +50,9 @@ jobs:
           [ -z "${VIPER_R}" ] && VIPER_R="${VIPER_CHECKOUT_REPO:-}"
           [ -z "${VIPER_R}" ] && VIPER_R="allenthomson-unbxd/viper"
 
-          # Tag for ECR: GitHub "latest" release, else newest release in list (covers prerelease-only repos).
-          tag_from_repo() {
+          tag_from_releases() {
             local repo="$1"
-            local j j2 t
+            local j j2
             j=$(gh api "repos/${repo}/releases/latest" 2>/dev/null || true)
             if echo "${j}" | jq -e 'has("tag_name") and (.tag_name | type == "string") and (.tag_name != "") and (.tag_name != "null")' >/dev/null 2>&1; then
               echo "${j}" | jq -r .tag_name
@@ -82,22 +66,81 @@ jobs:
             echo ""
           }
 
-          fc_img=$(tag_from_repo "${FEED_R}")
-          vp_img=$(tag_from_repo "${VIPER_R}")
+          # Newest annotated/lightweight tag by tagged date (works when there are no GitHub Releases).
+          tag_from_newest_git_tag() {
+            local repo="$1"
+            local owner="${repo%%/*}"
+            local name="${repo#*/}"
+            local out gql
+            gql='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){refs(refPrefix:"refs/tags/",first:1,orderBy:{field:TAGGED_DATE,direction:DESC}){nodes{name}}}}'
+            out=$(gh api graphql -f query="$gql" -f owner="$owner" -f name="$name" 2>/dev/null || true)
+            if echo "${out}" | jq -e '.data.repository.refs.nodes | length > 0' >/dev/null 2>&1; then
+              echo "${out}" | jq -r '.data.repository.refs.nodes[0].name' | sed 's#^refs/tags/##'
+              return 0
+            fi
+            echo ""
+          }
+
+          resolve_tag() {
+            local repo="$1"
+            local t
+            t=$(tag_from_releases "${repo}")
+            if [ -n "${t}" ] && [ "${t}" != "null" ]; then
+              echo "${t}"
+              return 0
+            fi
+            t=$(tag_from_newest_git_tag "${repo}")
+            if [ -n "${t}" ] && [ "${t}" != "null" ]; then
+              echo "${t}"
+              return 0
+            fi
+            echo ""
+          }
+
+          fc_img=$(resolve_tag "${FEED_R}")
+          vp_img=$(resolve_tag "${VIPER_R}")
+          if [ -z "${fc_img}" ] && [ -n "${FEED_TAG_FALLBACK_VAR:-}" ]; then
+            fc_img="${FEED_TAG_FALLBACK_VAR}"
+          fi
+          if [ -z "${vp_img}" ] && [ -n "${VIPER_TAG_FALLBACK_VAR:-}" ]; then
+            vp_img="${VIPER_TAG_FALLBACK_VAR}"
+          fi
 
           echo "feed_conversion_image_tag=${fc_img}" >> "$GITHUB_OUTPUT"
           echo "viper_image_tag=${vp_img}" >> "$GITHUB_OUTPUT"
-          echo "=== Onboarding prepare: release tag lookup (see prepare-context query params) ==="
+          echo "=== Onboarding prepare: image tag lookup (prepare-context query params) ==="
           echo "repos: feed-conversion=${FEED_R} viper=${VIPER_R}"
-          echo "resolved tags (passed to Viper prepare-context; empty means Viper uses env/API fallback):"
+          echo "resolved tags (Releases → newest git tag → repo vars FEED_CONVERSION_FALLBACK_IMAGE_TAG / VIPER_FALLBACK_IMAGE_TAG; empty → Viper env fallback):"
           echo "  feed-conversion image tag: ${fc_img:-<none>}"
           echo "  viper image tag:           ${vp_img:-<none>}"
           if [ -z "${fc_img}" ]; then
-            echo "::warning::feed-conversion: no GitHub Release tag resolved. Check: (1) FEED_CONVERSION_REPO + GH_CLONE_TOKEN can read the repo, (2) at least one published Release exists (plain git tags are not enough for this API)."
+            echo "::warning::feed-conversion: no tag resolved. Set repo Actions variable FEED_CONVERSION_FALLBACK_IMAGE_TAG, or ensure GH_CLONE_TOKEN can read ${FEED_R} and the repo has Releases or git tags."
           fi
           if [ -z "${vp_img}" ]; then
-            echo "::warning::viper: no GitHub Release tag resolved. Same checks for VIPER_RELEASE_REPO / VIPER_CHECKOUT_REPO / allenthomson-unbxd/viper and GH_CLONE_TOKEN."
+            echo "::warning::viper: no tag resolved. Set VIPER_FALLBACK_IMAGE_TAG, or ensure token can read ${VIPER_R} and the repo has Releases or git tags."
           fi
+
+      - id: fc_tag
+        env:
+          GH_TOKEN: ${{ env.GH_CLONE_TOKEN }}
+          FEED_IMG: ${{ steps.release_image_tags.outputs.feed_conversion_image_tag }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          FEED_REPO="${FEED_CONVERSION_REPO:-}"
+          [ -z "${FEED_REPO}" ] && FEED_REPO="allenthomson-unbxd/feed-conversion"
+          if [ -n "${FEED_IMG:-}" ] && [ "${FEED_IMG}" != "null" ]; then
+            TAG="${FEED_IMG}"
+          else
+            json=$(gh api "repos/${FEED_REPO}/releases/latest" 2>/dev/null || true)
+            if echo "${json}" | jq -e 'has("tag_name") and (.tag_name | type == "string")' >/dev/null 2>&1; then
+              TAG=$(echo "${json}" | jq -r .tag_name)
+            fi
+            if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
+              TAG=$(gh api "repos/${FEED_REPO}" --jq .default_branch)
+            fi
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - id: viper_ref
         if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
