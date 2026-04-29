@@ -7,7 +7,15 @@
 # Secrets: VIPER_INTERNAL_BASE_URL, ONBOARDING_INGEST_HMAC_SECRET, GH_CLONE_TOKEN
 # Optional: FEED_CONVERSION_REPO, VIPER_CHECKOUT_REPO (e.g. org/viper)
 # Optional repo variable VIPER_CHECKOUT_REF: branch/tag/SHA; if unset, default branch is resolved via gh api.
+# Optional repo variable VIPER_RELEASE_REPO: owner/repo used only for ``releases/latest`` (viper image tag).
+#   If unset, falls back to VIPER_CHECKOUT_REPO, then ``${GITHUB_REPOSITORY_OWNER}/viper`` (e.g. automation under
+#   ``allenthomson-unbxd/…`` → ``allenthomson-unbxd/viper``).
 # GH_CLONE_TOKEN: PAT with repo read to private Viper/feed-conversion; if unset, github.token is used (public repos only).
+#
+# Image tags for prepare-context: step ``release_image_tags`` calls ``gh api …/releases/latest`` on the runner
+# (same token as clone). Feed defaults to ``unbxd/feed-conversion`` when FEED_CONVERSION_REPO is unset; viper uses
+# the precedence above so Viper does not need ``ONBOARDING_*_RELEASE_REPO`` / ``ONBOARDING_RELEASES_GITHUB_TOKEN``
+# for that GET when releases exist.
 
 name: onboarding-prepare
 
@@ -22,6 +30,7 @@ jobs:
     env:
       VIPER_CHECKOUT_REPO: ${{ secrets.VIPER_CHECKOUT_REPO }}
       FEED_CONVERSION_REPO: ${{ secrets.FEED_CONVERSION_REPO }}
+      VIPER_RELEASE_REPO: ${{ vars.VIPER_RELEASE_REPO }}
       # Empty PAT would override checkout's default token; fall back for public clones.
       GH_CLONE_TOKEN: ${{ secrets.GH_CLONE_TOKEN != '' && secrets.GH_CLONE_TOKEN || github.token }}
     steps:
@@ -44,6 +53,29 @@ jobs:
             fi
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - id: release_image_tags
+        env:
+          GH_TOKEN: ${{ env.GH_CLONE_TOKEN }}
+        run: |
+          set -euo pipefail
+          FEED_R="${FEED_CONVERSION_REPO:-}"
+          [ -z "${FEED_R}" ] && FEED_R="allenthomson-unbxd/feed-conversion"
+          VIPER_R="${VIPER_RELEASE_REPO:-}"
+          [ -z "${VIPER_R}" ] && VIPER_R="${VIPER_CHECKOUT_REPO:-}"
+          [ -z "${VIPER_R}" ] && VIPER_R="${GITHUB_REPOSITORY_OWNER}/viper"
+          fc_img=""
+          vp_img=""
+          json=$(gh api "repos/${FEED_R}/releases/latest" 2>/dev/null || true)
+          if echo "${json}" | jq -e 'has("tag_name") and (.tag_name | type == "string")' >/dev/null 2>&1; then
+            fc_img=$(echo "${json}" | jq -r .tag_name)
+          fi
+          json2=$(gh api "repos/${VIPER_R}/releases/latest" 2>/dev/null || true)
+          if echo "${json2}" | jq -e 'has("tag_name") and (.tag_name | type == "string")' >/dev/null 2>&1; then
+            vp_img=$(echo "${json2}" | jq -r .tag_name)
+          fi
+          echo "feed_conversion_image_tag=${fc_img}" >> "$GITHUB_OUTPUT"
+          echo "viper_image_tag=${vp_img}" >> "$GITHUB_OUTPUT"
 
       - id: viper_ref
         if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
@@ -96,6 +128,8 @@ jobs:
           HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
           DRAFT_ID: ${{ github.event.client_payload.draft_id }}
           FEED_CONVERSION_TAG: ${{ steps.fc_tag.outputs.tag }}
+          PREPARE_FEED_IMAGE_TAG: ${{ steps.release_image_tags.outputs.feed_conversion_image_tag }}
+          PREPARE_VIPER_IMAGE_TAG: ${{ steps.release_image_tags.outputs.viper_image_tag }}
         run: |
           set -euo pipefail
           test -n "${VIPER_BASE:-}" && test -n "${HMAC_SECRET:-}" && test -n "${DRAFT_ID:-}"
@@ -106,12 +140,19 @@ jobs:
           secret = os.environ["HMAC_SECRET"].encode("utf-8")
           draft = os.environ["DRAFT_ID"].strip()
           fc_tag = (os.environ.get("FEED_CONVERSION_TAG") or "").strip()
+          fc_img = (os.environ.get("PREPARE_FEED_IMAGE_TAG") or "").strip()
+          viper_img = (os.environ.get("PREPARE_VIPER_IMAGE_TAG") or "").strip()
           ws = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 
           get_sig = hmac.new(secret, draft.encode("utf-8"), hashlib.sha256).hexdigest()
           u = "{}/setup/app/internal/onboarding/{}/prepare-context/".format(base, draft)
-          if fc_tag:
-              u += "?" + urllib.parse.urlencode({"feed_conversion_tag": fc_tag})
+          q = {}
+          if fc_img:
+              q["feed_conversion_tag"] = fc_img
+          if viper_img:
+              q["viper_image_tag"] = viper_img
+          if q:
+              u += "?" + urllib.parse.urlencode(q)
           req = urllib.request.Request(u, headers={"X-Onboarding-Signature": "sha256=" + get_sig})
           with urllib.request.urlopen(req, timeout=120) as resp:
               bundle = json.loads(resp.read().decode())
@@ -149,7 +190,7 @@ jobs:
               body_obj = json.load(fh)
           body = {
               "proposed_files": body_obj["proposed_files"],
-              "feed_conversion_tag": bundle.get("feed_conversion_tag") or fc_tag,
+              "feed_conversion_tag": bundle.get("feed_conversion_tag") or fc_img or fc_tag,
           }
           raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
           ps = hmac.new(secret, raw, hashlib.sha256).hexdigest()
@@ -170,6 +211,8 @@ jobs:
           HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
           DRAFT_ID: ${{ github.event.client_payload.draft_id }}
           FEED_CONVERSION_TAG: ${{ steps.fc_tag.outputs.tag }}
+          PREPARE_FEED_IMAGE_TAG: ${{ steps.release_image_tags.outputs.feed_conversion_image_tag }}
+          PREPARE_VIPER_IMAGE_TAG: ${{ steps.release_image_tags.outputs.viper_image_tag }}
         run: |
           test -n "$VIPER_BASE" && test -n "$HMAC_SECRET" && test -n "$DRAFT_ID"
           python3 << 'PY'
@@ -178,14 +221,24 @@ jobs:
           secret = os.environ["HMAC_SECRET"].encode("utf-8")
           draft = os.environ["DRAFT_ID"].strip()
           fc_tag = (os.environ.get("FEED_CONVERSION_TAG") or "").strip()
+          fc_img = (os.environ.get("PREPARE_FEED_IMAGE_TAG") or "").strip()
+          viper_img = (os.environ.get("PREPARE_VIPER_IMAGE_TAG") or "").strip()
           get_sig = hmac.new(secret, draft.encode("utf-8"), hashlib.sha256).hexdigest()
           u = "{}/setup/app/internal/onboarding/{}/prepare-context/".format(base, draft)
-          if fc_tag:
-              u += "?" + urllib.parse.urlencode({"feed_conversion_tag": fc_tag})
+          q = {}
+          if fc_img:
+              q["feed_conversion_tag"] = fc_img
+          if viper_img:
+              q["viper_image_tag"] = viper_img
+          if q:
+              u += "?" + urllib.parse.urlencode(q)
           r = urllib.request.Request(u, headers={"X-Onboarding-Signature": "sha256=" + get_sig})
           with urllib.request.urlopen(r, timeout=120) as resp:
               bundle = json.loads(resp.read().decode())
-          body = {"proposed_files": bundle["proposed_files"], "feed_conversion_tag": bundle.get("feed_conversion_tag") or fc_tag}
+          body = {
+              "proposed_files": bundle["proposed_files"],
+              "feed_conversion_tag": bundle.get("feed_conversion_tag") or fc_img or fc_tag,
+          }
           raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
           ps = hmac.new(secret, raw, hashlib.sha256).hexdigest()
           p = urllib.request.Request(

@@ -4,7 +4,8 @@
 #   client_payload: { draft_id, site_key, customer_folder_name }
 #
 # Secrets: VIPER_INTERNAL_BASE_URL, ONBOARDING_INGEST_HMAC_SECRET, GH_CLONE_TOKEN,
-#          SOLUTION_JOBS_REPO (owner/repo), optional SOLUTION_JOBS_BASE_PATH (default: customers)
+#          SOLUTION_JOBS_REPO (owner/repo), optional SOLUTION_JOBS_BASE_PATH (default: customers).
+# Apply pushes a branch ``onboarding/<draft-prefix>-<folder>`` to solution-jobs (no PR).
 
 name: onboarding-apply
 
@@ -58,9 +59,8 @@ jobs:
           print("Wrote tree under", root)
           PY
 
-      - name: Create branch and PR
+      - name: Create branch and push
         env:
-          GH_TOKEN: ${{ secrets.GH_CLONE_TOKEN }}
           FOLDER: ${{ github.event.client_payload.customer_folder_name }}
           SITE_KEY: ${{ github.event.client_payload.site_key }}
           DRAFT_ID: ${{ github.event.client_payload.draft_id }}
@@ -77,4 +77,4 @@ jobs:
           git status
           git commit -m "Onboarding: ${FOLDER} (site ${SITE_KEY})" || { echo "Nothing to commit"; exit 0; }
           git push -u origin "HEAD:refs/heads/$BRANCH"
-          gh pr create --fill --head "$BRANCH" --title "Onboarding: ${FOLDER} (${SITE_KEY})" --body "Automated from Viper draft \`${DRAFT_ID}\`." || true
+          echo "Pushed branch ${BRANCH} (open a PR manually in GitHub if needed)."
