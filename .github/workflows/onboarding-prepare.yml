@@ -79,7 +79,15 @@ jobs:
 
       - name: Install merge tooling
         if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
-        run: pip install -r viper/onboarding/requirements-ci.txt
+        run: |
+          set -euo pipefail
+          REQ="viper/onboarding/requirements-ci.txt"
+          if [ -f "${REQ}" ]; then
+            pip install -r "${REQ}"
+          else
+            # Checked-out Viper ref may predate onboarding/requirements-ci.txt; keep in sync with that file.
+            pip install 'cookiecutter>=2.6.0' 'PyYAML>=6.0.2'
+          fi
 
       - name: Local cookiecutter merge + ingest
         if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
