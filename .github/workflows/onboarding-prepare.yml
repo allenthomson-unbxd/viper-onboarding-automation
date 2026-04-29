@@ -14,8 +14,8 @@
 # Release / image tag resolution (``release_image_tags`` then ``fc_tag`` for feed clone ref):
 #   Repos: feed = FEED_CONVERSION_REPO secret or ``allenthomson-unbxd/feed-conversion``; viper =
 #   VIPER_RELEASE_REPO var or VIPER_CHECKOUT_REPO secret or ``allenthomson-unbxd/viper``.
-#   Order per repo: (1) GitHub Releases (latest / first release), (2) newest git tag (GraphQL by tagged date),
-#   (3) optional repo variables FEED_CONVERSION_FALLBACK_IMAGE_TAG / VIPER_FALLBACK_IMAGE_TAG.
+#   Order per repo: (1) Releases, (2) GraphQL newest tag by date, (3) REST /tags (version-sorted),
+#   (4) ``git ls-remote`` (private repos often succeed here), (5) vars FEED_CONVERSION_FALLBACK_IMAGE_TAG / VIPER_FALLBACK_IMAGE_TAG.
 #   If CI still passes no tag, Viper ``prepare-context`` uses ``ONBOARDING_*_IMAGE_TAG`` env on the server.
 
 name: onboarding-prepare
@@ -66,7 +66,7 @@ jobs:
             echo ""
           }
 
-          # Newest annotated/lightweight tag by tagged date (works when there are no GitHub Releases).
+          # Newest tag by tagged date (GraphQL); tolerate null repository (no access / wrong name).
           tag_from_newest_git_tag() {
             local repo="$1"
             local owner="${repo%%/*}"
@@ -74,8 +74,42 @@ jobs:
             local out gql
             gql='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){refs(refPrefix:"refs/tags/",first:1,orderBy:{field:TAGGED_DATE,direction:DESC}){nodes{name}}}}'
             out=$(gh api graphql -f query="$gql" -f owner="$owner" -f name="$name" 2>/dev/null || true)
-            if echo "${out}" | jq -e '.data.repository.refs.nodes | length > 0' >/dev/null 2>&1; then
-              echo "${out}" | jq -r '.data.repository.refs.nodes[0].name' | sed 's#^refs/tags/##'
+            if echo "${out}" | jq -e '(.data.repository // empty | .refs.nodes // []) | length > 0' >/dev/null 2>&1; then
+              echo "${out}" | jq -r '(.data.repository // empty | .refs.nodes[0].name // empty)' | sed 's#^refs/tags/##'
+              return 0
+            fi
+            echo ""
+          }
+
+          # REST list tags (up to 100); pick highest by version sort (GNU sort -V on ubuntu-latest).
+          tag_from_rest_tags() {
+            local repo="$1"
+            local j best
+            j=$(gh api "repos/${repo}/tags?per_page=100" 2>/dev/null || true)
+            if ! echo "${j}" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+              echo ""
+              return 0
+            fi
+            best=$(echo "${j}" | jq -r '.[].name' 2>/dev/null | grep -E '^[^[:space:]]+$' | sort -V | tail -n1)
+            if [ -n "${best}" ] && [ "${best}" != "null" ]; then
+              echo "${best}"
+              return 0
+            fi
+            echo ""
+          }
+
+          # HTTPS ls-remote (works for many private repos when API tag listing is empty or blocked).
+          tag_from_git_ls_remote() {
+            local repo="$1"
+            local url t
+            url="https://x-access-token:${GH_TOKEN}@github.com/${repo}.git"
+            t=$(
+              GIT_TERMINAL_PROMPT=0 git ls-remote --tags "$url" 2>/dev/null \
+                | awk -F'\t' '$2 ~ /^refs\/tags\// && $2 !~ /\^{}$/ { sub(/^refs\/tags\//, "", $2); print $2 }' \
+                | sort -V | tail -n1
+            )
+            if [ -n "${t}" ]; then
+              echo "${t}"
               return 0
             fi
             echo ""
@@ -90,6 +124,16 @@ jobs:
               return 0
             fi
             t=$(tag_from_newest_git_tag "${repo}")
+            if [ -n "${t}" ] && [ "${t}" != "null" ]; then
+              echo "${t}"
+              return 0
+            fi
+            t=$(tag_from_rest_tags "${repo}")
+            if [ -n "${t}" ] && [ "${t}" != "null" ]; then
+              echo "${t}"
+              return 0
+            fi
+            t=$(tag_from_git_ls_remote "${repo}")
             if [ -n "${t}" ] && [ "${t}" != "null" ]; then
               echo "${t}"
               return 0
@@ -110,14 +154,22 @@ jobs:
           echo "viper_image_tag=${vp_img}" >> "$GITHUB_OUTPUT"
           echo "=== Onboarding prepare: image tag lookup (prepare-context query params) ==="
           echo "repos: feed-conversion=${FEED_R} viper=${VIPER_R}"
-          echo "resolved tags (Releases → newest git tag → repo vars FEED_CONVERSION_FALLBACK_IMAGE_TAG / VIPER_FALLBACK_IMAGE_TAG; empty → Viper env fallback):"
+          echo "resolved tags (Releases → GraphQL tag → REST /tags → git ls-remote → vars …_FALLBACK_IMAGE_TAG; empty → Viper env):"
           echo "  feed-conversion image tag: ${fc_img:-<none>}"
           echo "  viper image tag:           ${vp_img:-<none>}"
           if [ -z "${fc_img}" ]; then
-            echo "::warning::feed-conversion: no tag resolved. Set repo Actions variable FEED_CONVERSION_FALLBACK_IMAGE_TAG, or ensure GH_CLONE_TOKEN can read ${FEED_R} and the repo has Releases or git tags."
+            if ! gh api "repos/${FEED_R}" --jq .id >/dev/null 2>&1; then
+              echo "::warning::feed-conversion: cannot read repo \"${FEED_R}\" with current token (404/forbidden). Fix FEED_CONVERSION_REPO secret, add GH_CLONE_TOKEN PAT with repo read, or set FEED_CONVERSION_FALLBACK_IMAGE_TAG."
+            else
+              echo "::warning::feed-conversion: repo readable but no tag found (no releases/tags, or tag names not sortable). Set FEED_CONVERSION_FALLBACK_IMAGE_TAG."
+            fi
           fi
           if [ -z "${vp_img}" ]; then
-            echo "::warning::viper: no tag resolved. Set VIPER_FALLBACK_IMAGE_TAG, or ensure token can read ${VIPER_R} and the repo has Releases or git tags."
+            if ! gh api "repos/${VIPER_R}" --jq .id >/dev/null 2>&1; then
+              echo "::warning::viper: cannot read repo \"${VIPER_R}\" with current token. Fix GH_CLONE_TOKEN or set VIPER_FALLBACK_IMAGE_TAG."
+            else
+              echo "::warning::viper: repo readable but no tag resolved. Set VIPER_FALLBACK_IMAGE_TAG or add semver-like git tags."
+            fi
           fi
 
       - id: fc_tag
