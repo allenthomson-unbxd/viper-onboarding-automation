@@ -1,0 +1,32 @@
+name: Onboarding — apply
+
+on:
+  repository_dispatch:
+    types: [onboarding-apply]
+
+concurrency:
+  group: onboarding-apply-${{ github.event.client_payload.draft_id }}
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show dispatch payload
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          echo "repository_dispatch payload:"
+          echo "$PAYLOAD"
+
+      - name: Checkout automation repo (scripts)
+        uses: actions/checkout@v4
+
+      # --- Next steps (implement incrementally) ---
+      # - GET approved file bundle from Viper (token or HMAC query param)
+      # - Clone solution-jobs v3, create branch onboarding/<draft_id or site_key>
+      # - Write customer folder, commit, push
+      # - gh pr create (needs GH_CLONE_TOKEN with repo + pull_requests)
+
+      - name: Placeholder — mark job visible in Actions UI
+        run: echo "apply stub complete for draft_id=${{ github.event.client_payload.draft_id }}"

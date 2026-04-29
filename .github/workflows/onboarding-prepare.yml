@@ -1,0 +1,33 @@
+name: Onboarding — prepare
+
+on:
+  repository_dispatch:
+    types: [onboarding-prepare]
+
+concurrency:
+  group: onboarding-prepare-${{ github.event.client_payload.draft_id }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show dispatch payload
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          echo "repository_dispatch payload:"
+          echo "$PAYLOAD"
+
+      - name: Checkout automation repo (scripts)
+        uses: actions/checkout@v4
+
+      # --- Next steps (implement incrementally) ---
+      # - Clone viper + feed-conversion with PAT (secrets.GH_CLONE_TOKEN)
+      # - Resolve latest feed-conversion release tag (gh api)
+      # - Build proposed_files JSON / YAML bundle
+      # - POST to ${{ secrets.VIPER_BASE_URL }}/internal/onboarding/<draft_id>/ingest-prepare/
+      #   with HMAC-SHA256 using secrets.VIPER_ONBOARDING_HMAC_SECRET
+
+      - name: Placeholder — mark job visible in Actions UI
+        run: echo "prepare stub complete for draft_id=${{ github.event.client_payload.draft_id }}"
