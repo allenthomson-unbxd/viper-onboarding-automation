@@ -4,7 +4,9 @@
 #   client_payload: { draft_id, site_key, customer_folder_name }
 #
 # Secrets: VIPER_INTERNAL_BASE_URL, ONBOARDING_INGEST_HMAC_SECRET, GH_CLONE_TOKEN,
-#          SOLUTION_JOBS_REPO (owner/repo), optional SOLUTION_JOBS_BASE_PATH (default: customers).
+#          SOLUTION_JOBS_REPO (owner/repo).
+# Approved files are written under ``src/feed-conversion/<customer_folder>/`` (e.g. ``src/feed-conversion/mazzucchellis/``).
+# Optional repo variable SOLUTION_JOBS_CUSTOMER_ROOT overrides that parent directory (default: src/feed-conversion).
 # Apply pushes a branch ``onboarding/<draft-prefix>-<folder>`` to solution-jobs (no PR).
 
 name: onboarding-apply
@@ -29,11 +31,11 @@ jobs:
           VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
           HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
           DRAFT_ID: ${{ github.event.client_payload.draft_id }}
-          BASE_PATH: ${{ vars.SOLUTION_JOBS_BASE_PATH }}
+          CUSTOMER_ROOT: ${{ vars.SOLUTION_JOBS_CUSTOMER_ROOT }}
           FOLDER: ${{ github.event.client_payload.customer_folder_name }}
         run: |
           set -euo pipefail
-          export BASE_PATH="${BASE_PATH:-customers}"
+          export CUSTOMER_ROOT="${CUSTOMER_ROOT:-src/feed-conversion}"
           test -n "${VIPER_BASE:-}" && test -n "${HMAC_SECRET:-}" && test -n "${DRAFT_ID:-}"
           test -n "${FOLDER:-}" || (echo "customer_folder_name missing in payload" && exit 1)
           python3 << 'PY'
@@ -48,7 +50,8 @@ jobs:
           with urllib.request.urlopen(req, timeout=120) as resp:
               bundle = json.loads(resp.read().decode())
 
-          root = pathlib.Path("solution-jobs") / os.environ.get("BASE_PATH", "customers") / os.environ["FOLDER"]
+          parent = (os.environ.get("CUSTOMER_ROOT") or "src/feed-conversion").strip().strip("/")
+          root = pathlib.Path("solution-jobs") / pathlib.Path(parent) / os.environ["FOLDER"]
           root.mkdir(parents=True, exist_ok=True)
           for rel, text in bundle["approved_files"].items():
               if rel.startswith("onboarding/"):
@@ -66,16 +69,16 @@ jobs:
           FOLDER: ${{ github.event.client_payload.customer_folder_name }}
           SITE_KEY: ${{ github.event.client_payload.site_key }}
           DRAFT_ID: ${{ github.event.client_payload.draft_id }}
-          BASE_PATH: ${{ vars.SOLUTION_JOBS_BASE_PATH }}
+          CUSTOMER_ROOT: ${{ vars.SOLUTION_JOBS_CUSTOMER_ROOT }}
         working-directory: solution-jobs
         run: |
           set -euo pipefail
-          export BASE_PATH="${BASE_PATH:-customers}"
+          export CUSTOMER_ROOT="${CUSTOMER_ROOT:-src/feed-conversion}"
           BRANCH="onboarding/${DRAFT_ID:0:8}-${FOLDER}"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions"
           git checkout -b "$BRANCH"
-          git add "${BASE_PATH}/${FOLDER}"
+          git add "${CUSTOMER_ROOT}/${FOLDER}"
           git status
           git commit -m "Onboarding: ${FOLDER} (site ${SITE_KEY})" || { echo "Nothing to commit"; exit 0; }
           git push -u origin "HEAD:refs/heads/$BRANCH"
