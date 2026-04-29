@@ -34,8 +34,12 @@ jobs:
           set -euo pipefail
           TAG=""
           if [ -n "${FEED_CONVERSION_REPO:-}" ]; then
-            TAG=$(gh api "repos/${FEED_CONVERSION_REPO}/releases/latest" --jq .tag_name 2>/dev/null || true)
-            if [ -z "${TAG}" ]; then
+            # releases/latest returns 404 JSON on stdout when there are no releases; do not pass that to checkout ref.
+            json=$(gh api "repos/${FEED_CONVERSION_REPO}/releases/latest" 2>/dev/null || true)
+            if echo "${json}" | jq -e 'has("tag_name") and (.tag_name | type == "string")' >/dev/null 2>&1; then
+              TAG=$(echo "${json}" | jq -r .tag_name)
+            fi
+            if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
               TAG=$(gh api "repos/${FEED_CONVERSION_REPO}" --jq .default_branch)
             fi
           fi
