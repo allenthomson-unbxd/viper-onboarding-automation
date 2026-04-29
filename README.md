@@ -9,16 +9,16 @@ GitHub Actions workflows triggered by Viper via [`repository_dispatch`](https://
 | `onboarding-prepare`   | `onboarding-prepare.yml`      | Clone viper + feed-conversion, resolve latest FC tag, build proposed config, POST results to Viper. |
 | `onboarding-apply`     | `onboarding-apply.yml`        | Fetch approved bundle from Viper, clone solution-jobs v3, branch, copy customer folder, open PR. |
 
-Viper should send `client_payload` at minimum:
+Viper sends `client_payload` on successful site-config save (when `GITHUB_ONBOARDING_REPO` and `GITHUB_ONBOARDING_TOKEN` are set), for example:
 
 ```json
 {
   "draft_id": "<uuid>",
-  "mode": "prepare"
+  "site_key": "<unbxd site key>"
 }
 ```
 
-(`mode` is redundant with `event_type` but useful for logging.) For `apply`, same `draft_id`.
+For `onboarding-apply`, use the same `draft_id` after the operator approves the draft in Viper.
 
 ## Repository secrets
 
@@ -26,9 +26,11 @@ Configure in **Settings → Secrets and variables → Actions** for this repo:
 
 | Secret | Used by |
 |--------|---------|
-| `VIPER_BASE_URL` | Workflows calling back to Viper (e.g. `https://viper.example.com`). |
-| `VIPER_ONBOARDING_HMAC_SECRET` | Shared secret to sign `POST` bodies to Viper ingest endpoints. |
-| `GH_CLONE_TOKEN` | PAT with `repo` scope to clone **viper**, **feed-conversion**, and **solution-jobs** (read + push where needed). Optional if all repos are public and default `GITHUB_TOKEN` suffices (rare for private monorepos). |
+| `VIPER_INTERNAL_BASE_URL` | Public base URL of Viper, no trailing slash (e.g. `https://search-pimapps.unbxd.io`). Used for `POST …/setup/app/internal/onboarding/<draft_id>/ingest-prepare/`. GitHub cannot reach `http://localhost`; use a deployed URL or a tunnel. |
+| `ONBOARDING_INGEST_HMAC_SECRET` | Same value as Viper env `ONBOARDING_INGEST_HMAC_SECRET`. Signs the raw JSON body for ingest. |
+| `GH_CLONE_TOKEN` | PAT with `repo` scope to clone **viper**, **feed-conversion**, and **solution-jobs** (read + push where needed). Optional until clone/PR steps are implemented; optional if repos are public and `GITHUB_TOKEN` is enough. |
+
+If `VIPER_INTERNAL_BASE_URL` or `ONBOARDING_INGEST_HMAC_SECRET` is unset, **prepare** still runs but **skips** the ingest step (stub mode).
 
 ## Manual test dispatch
 
@@ -37,7 +39,7 @@ Replace `ORG/REPO` with this repository’s full name:
 ```bash
 gh api repos/ORG/REPO/dispatches \
   -f event_type=onboarding-prepare \
-  -f client_payload='{"draft_id":"00000000-0000-0000-0000-000000000000"}'
+  -f client_payload='{"draft_id":"00000000-0000-0000-0000-000000000000","site_key":"your-site-key"}'
 ```
 
 ## Related repositories

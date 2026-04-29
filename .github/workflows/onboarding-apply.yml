@@ -22,11 +22,12 @@ jobs:
       - name: Checkout automation repo (scripts)
         uses: actions/checkout@v4
 
-      # --- Next steps (implement incrementally) ---
-      # - GET approved file bundle from Viper (token or HMAC query param)
-      # - Clone solution-jobs v3, create branch onboarding/<draft_id or site_key>
-      # - Write customer folder, commit, push
-      # - gh pr create (needs GH_CLONE_TOKEN with repo + pull_requests)
+      # --- Next steps ---
+      # - Optional: GET approved bundle from Viper (new endpoint + auth TBD).
+      # - Clone solution-jobs (v3 / configured ref) using secrets.GH_CLONE_TOKEN.
+      # - Branch: e.g. onboarding/<site_key>-<draft_id short>
+      # - Copy customer folder from checkout or artifact, commit, push.
+      # - gh pr create (token needs contents + pull_requests on solution-jobs).
 
       - name: Placeholder — mark job visible in Actions UI
         run: echo "apply stub complete for draft_id=${{ github.event.client_payload.draft_id }}"

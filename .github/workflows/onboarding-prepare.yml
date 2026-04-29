@@ -22,12 +22,60 @@ jobs:
       - name: Checkout automation repo (scripts)
         uses: actions/checkout@v4
 
-      # --- Next steps (implement incrementally) ---
-      # - Clone viper + feed-conversion with PAT (secrets.GH_CLONE_TOKEN)
-      # - Resolve latest feed-conversion release tag (gh api)
-      # - Build proposed_files JSON / YAML bundle
-      # - POST to ${{ secrets.VIPER_BASE_URL }}/internal/onboarding/<draft_id>/ingest-prepare/
-      #   with HMAC-SHA256 using secrets.VIPER_ONBOARDING_HMAC_SECRET
+      # --- Next: clone viper + feed-conversion (e.g. secrets.GH_CLONE_TOKEN), run generators ---
+      # Build ``proposed_files`` as a JSON object: path -> file contents (strings).
 
-      - name: Placeholder — mark job visible in Actions UI
-        run: echo "prepare stub complete for draft_id=${{ github.event.client_payload.draft_id }}"
+      - name: Ingest prepare result into Viper
+        env:
+          VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
+          HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
+          DRAFT_ID: ${{ github.event.client_payload.draft_id }}
+          SITE_KEY: ${{ github.event.client_payload.site_key }}
+        run: |
+          if [ -z "${VIPER_BASE:-}" ] || [ -z "${HMAC_SECRET:-}" ]; then
+            echo "::notice::Skipping Viper ingest — add repo secrets VIPER_INTERNAL_BASE_URL and ONBOARDING_INGEST_HMAC_SECRET (same value as Viper env ONBOARDING_INGEST_HMAC_SECRET)."
+            exit 0
+          fi
+          if [ -z "${DRAFT_ID:-}" ]; then
+            echo "::error::client_payload.draft_id is required"
+            exit 1
+          fi
+          python3 << 'PY'
+          import hmac, hashlib, json, os, sys, urllib.error, urllib.request
+
+          base = (os.environ.get("VIPER_BASE") or "").rstrip("/")
+          secret = (os.environ.get("HMAC_SECRET") or "").encode("utf-8")
+          draft = os.environ.get("DRAFT_ID") or ""
+          site_key = os.environ.get("SITE_KEY") or ""
+
+          body = {
+              "proposed_files": {
+                  "_generated_by": "viper-onboarding-automation",
+                  "_site_key": site_key,
+                  "_note": "Replace this stub with real paths and file contents from your generator.",
+              },
+              "feed_conversion_tag": "",
+          }
+          raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+          sig = hmac.new(secret, raw, hashlib.sha256).hexdigest()
+          url = f"{base}/setup/app/internal/onboarding/{draft}/ingest-prepare/"
+          req = urllib.request.Request(
+              url,
+              data=raw,
+              headers={
+                  "Content-Type": "application/json",
+                  "X-Onboarding-Signature": f"sha256={sig}",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=120) as resp:
+                  print(resp.read().decode())
+          except urllib.error.HTTPError as e:
+              try:
+                  detail = e.read().decode()
+              except Exception:
+                  detail = str(e)
+              sys.stderr.write(detail)
+              raise
+          PY
