@@ -1,6 +1,6 @@
 # Copy to viper-onboarding-automation/.github/workflows/onboarding-prepare.yml
 #
-# When secrets.VIPER_CHECKOUT_REPO is set: clones viper + feed-conversion, runs
+# When VIPER_CHECKOUT_REPO secret is non-empty (exposed as job env for if:): clones viper + feed-conversion, runs
 # cookiecutter per onboarding/baseoverlay.yml, merges, POSTs ingest-prepare.
 # Otherwise: server-only flow (GET prepare-context returns proposed_files from Viper).
 #
@@ -16,13 +16,15 @@ on:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    # secrets cannot be used in step `if:`; mirror into env for conditional steps.
+    env:
+      VIPER_CHECKOUT_REPO: ${{ secrets.VIPER_CHECKOUT_REPO }}
+      FEED_CONVERSION_REPO: ${{ secrets.FEED_CONVERSION_REPO }}
+      GH_CLONE_TOKEN: ${{ secrets.GH_CLONE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - id: fc_tag
-        env:
-          FEED_CONVERSION_REPO: ${{ secrets.FEED_CONVERSION_REPO }}
-          GH_CLONE_TOKEN: ${{ secrets.GH_CLONE_TOKEN }}
         run: |
           TAG=""
           TOKEN="${GH_CLONE_TOKEN:-$GITHUB_TOKEN}"
@@ -32,7 +34,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout viper (for local merge)
-        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' }}
+        if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.VIPER_CHECKOUT_REPO }}
@@ -41,7 +43,7 @@ jobs:
           token: ${{ secrets.GH_CLONE_TOKEN }}
 
       - name: Checkout feed-conversion
-        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' && secrets.FEED_CONVERSION_REPO != '' }}
+        if: ${{ env.VIPER_CHECKOUT_REPO != '' && env.FEED_CONVERSION_REPO != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.FEED_CONVERSION_REPO }}
@@ -50,11 +52,11 @@ jobs:
           token: ${{ secrets.GH_CLONE_TOKEN }}
 
       - name: Install merge tooling
-        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' }}
+        if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
         run: pip install -r viper/onboarding/requirements-ci.txt
 
       - name: Local cookiecutter merge + ingest
-        if: ${{ secrets.VIPER_CHECKOUT_REPO != '' }}
+        if: ${{ env.VIPER_CHECKOUT_REPO != '' }}
         env:
           VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
           HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
@@ -128,7 +130,7 @@ jobs:
           PY
 
       - name: Viper prepare-context + ingest (server-only)
-        if: ${{ secrets.VIPER_CHECKOUT_REPO == '' }}
+        if: ${{ env.VIPER_CHECKOUT_REPO == '' }}
         env:
           VIPER_BASE: ${{ secrets.VIPER_INTERNAL_BASE_URL }}
           HMAC_SECRET: ${{ secrets.ONBOARDING_INGEST_HMAC_SECRET }}
